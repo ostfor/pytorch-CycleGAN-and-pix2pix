@@ -5,13 +5,7 @@ import ntpath
 import time
 from . import util, html
 from subprocess import Popen, PIPE
-
-
-if sys.version_info[0] == 2:
-    VisdomExceptionBase = Exception
-else:
-    VisdomExceptionBase = ConnectionError
-
+import wandb
 
 def save_images(webpage, visuals, image_path, aspect_ratio=1.0, width=256):
     """Save images to the disk.
@@ -43,6 +37,7 @@ def save_images(webpage, visuals, image_path, aspect_ratio=1.0, width=256):
     webpage.add_images(ims, txts, links, width=width)
 
 
+
 class Visualizer():
     """This class includes several functions that can display/save images and print/save logging information.
 
@@ -59,6 +54,7 @@ class Visualizer():
         Step 3: create an HTML object for saveing HTML filters
         Step 4: create a logging file to store training losses
         """
+
         self.opt = opt  # cache the option
         self.display_id = opt.display_id
         self.use_html = opt.isTrain and not opt.no_html
@@ -67,17 +63,15 @@ class Visualizer():
         self.port = opt.display_port
         self.saved = False
         if self.display_id > 0:  # connect to a visdom server given <display_port> and <display_server>
-            import visdom
+            import wandb
             self.ncols = opt.display_ncols
-            self.vis = visdom.Visdom(server=opt.display_server, port=opt.display_port, env=opt.display_env)
-            if not self.vis.check_connection():
-                self.create_visdom_connections()
 
         if self.use_html:  # create an HTML object at <checkpoints_dir>/web/; images will be saved under <checkpoints_dir>/web/images/
             self.web_dir = os.path.join(opt.checkpoints_dir, opt.name, 'web')
             self.img_dir = os.path.join(self.web_dir, 'images')
             print('create web directory %s...' % self.web_dir)
             util.mkdirs([self.web_dir, self.img_dir])
+
         # create a logging file to store training losses
         self.log_name = os.path.join(opt.checkpoints_dir, opt.name, 'loss_log.txt')
         with open(self.log_name, "a") as log_file:
@@ -103,55 +97,16 @@ class Visualizer():
             epoch (int) - - the current epoch
             save_result (bool) - - if save the current results to an HTML file
         """
-        if self.display_id > 0:  # show images in the browser using visdom
-            ncols = self.ncols
-            if ncols > 0:        # show all the images in one visdom panel
-                ncols = min(ncols, len(visuals))
-                h, w = next(iter(visuals.values())).shape[:2]
-                table_css = """<style>
-                        table {border-collapse: separate; border-spacing: 4px; white-space: nowrap; text-align: center}
-                        table td {width: % dpx; height: % dpx; padding: 4px; outline: 4px solid black}
-                        </style>""" % (w, h)  # create a table css
-                # create a table of images.
-                title = self.name
-                label_html = ''
-                label_html_row = ''
-                images = []
-                idx = 0
-                for label, image in visuals.items():
-                    image_numpy = util.tensor2im(image)
-                    label_html_row += '<td>%s</td>' % label
-                    images.append(image_numpy.transpose([2, 0, 1]))
-                    idx += 1
-                    if idx % ncols == 0:
-                        label_html += '<tr>%s</tr>' % label_html_row
-                        label_html_row = ''
-                white_image = np.ones_like(image_numpy.transpose([2, 0, 1])) * 255
-                while idx % ncols != 0:
-                    images.append(white_image)
-                    label_html_row += '<td></td>'
-                    idx += 1
-                if label_html_row != '':
-                    label_html += '<tr>%s</tr>' % label_html_row
-                try:
-                    self.vis.images(images, nrow=ncols, win=self.display_id + 1,
-                                    padding=2, opts=dict(title=title + ' images'))
-                    label_html = '<table>%s</table>' % label_html
-                    self.vis.text(table_css + label_html, win=self.display_id + 2,
-                                  opts=dict(title=title + ' labels'))
-                except VisdomExceptionBase:
-                    self.create_visdom_connections()
+        # show each image in a separate visdom panel;
+        idx = 1
+        for label, image in visuals.items():
+            image_numpy = util.tensor2im(image)
 
-            else:     # show each image in a separate visdom panel;
-                idx = 1
-                try:
-                    for label, image in visuals.items():
-                        image_numpy = util.tensor2im(image)
-                        self.vis.image(image_numpy.transpose([2, 0, 1]), opts=dict(title=label),
-                                       win=self.display_id + idx)
-                        idx += 1
-                except VisdomExceptionBase:
-                    self.create_visdom_connections()
+            #wandb.log({"example": [wandb.Image(image_numpy)], "caption": label} )
+            wandb.log({label: [wandb.Image(image_numpy)]} )
+            #image(.transpose([2, 0, 1]), opts=dict(title=label),
+            #               win=self.display_id + idx)
+            idx += 1
 
         if self.use_html and (save_result or not self.saved):  # save images to an HTML file if they haven't been saved.
             self.saved = True
@@ -184,22 +139,12 @@ class Visualizer():
             counter_ratio (float) -- progress (percentage) in the current epoch, between 0 to 1
             losses (OrderedDict)  -- training losses stored in the format of (name, float) pairs
         """
+        wandb.log(losses)
         if not hasattr(self, 'plot_data'):
             self.plot_data = {'X': [], 'Y': [], 'legend': list(losses.keys())}
         self.plot_data['X'].append(epoch + counter_ratio)
         self.plot_data['Y'].append([losses[k] for k in self.plot_data['legend']])
-        try:
-            self.vis.line(
-                X=np.stack([np.array(self.plot_data['X'])] * len(self.plot_data['legend']), 1),
-                Y=np.array(self.plot_data['Y']),
-                opts={
-                    'title': self.name + ' loss over time',
-                    'legend': self.plot_data['legend'],
-                    'xlabel': 'epoch',
-                    'ylabel': 'loss'},
-                win=self.display_id)
-        except VisdomExceptionBase:
-            self.create_visdom_connections()
+
 
     # losses: same format as |losses| of plot_current_losses
     def print_current_losses(self, epoch, iters, losses, t_comp, t_data):
